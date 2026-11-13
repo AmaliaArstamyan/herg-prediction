@@ -20,4 +20,4 @@ app:
 	@PYTHONPATH=. $(VENV)/bin/streamlit run src/app.py
 
 train:
-	@PYTHONPATH=. $(PYTHON_VENV) -m src.train
+	@PYTHONPATH=. $(PYTHON_VENV) -m src.train --tuning-search --model-selection recall_at_precision --verbose
