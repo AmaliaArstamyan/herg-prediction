@@ -7,9 +7,10 @@ from rdkit.Chem import Draw
 
 from src.molecules import (
     calculate_descriptors,
-    morgan_fingerprint,
+    molecular_features,
     parse_smiles,
 )
+from src.modeling import inhibition_scores
 
 MODEL_PATH = Path(__file__).resolve().parents[1] / "models/herg_model.joblib"
 DATASET_PATH = Path(__file__).resolve().parents[1] / "data/raw/herg_karim.csv"
@@ -64,6 +65,15 @@ translations = {
         "cv_auprc_mean": "AUPRC mean",
         "cv_auprc_std": "AUPRC SD",
         "test_summary": "Final test-set metrics",
+        "threshold_summary": "Decision threshold: {threshold:.3f} (selected on training scaffold-CV)",
+        "precision_policy": "Policy: training CV precision at least {target:.0%}, then maximum recall. The target is not guaranteed on new compounds.",
+        "f1_policy": "Policy: maximum training CV F1.",
+        "model_policy": "Model selected by maximum training OOF recall at precision ≥ {target:.0%}.",
+        "candidate_recall": "OOF recall",
+        "candidate_precision": "OOF precision",
+        "candidate_threshold": "Threshold",
+        "baseline_summary": "Original classifier decision rule (baseline)",
+        "tuned_summary": "Test metrics at the selected threshold",
         "test_confusion": "Test-set classifications",
         "metric_labels": {
             "auprc": "AUPRC",
@@ -71,6 +81,8 @@ translations = {
             "balanced_accuracy": "Balanced accuracy",
             "f1": "F1",
             "mcc": "MCC",
+            "precision": "Precision",
+            "recall": "Recall",
         },
         "confusion_labels": {
             "true_negatives": "True negatives",
@@ -135,6 +147,15 @@ translations = {
         "cv_auprc_mean": "Среднее AUPRC",
         "cv_auprc_std": "SD AUPRC",
         "test_summary": "Метрики итоговой тестовой выборки",
+        "threshold_summary": "Порог: {threshold:.3f} (выбран на обучающей scaffold-CV)",
+        "precision_policy": "Политика: precision на обучающей CV не ниже {target:.0%}, затем максимум recall. Цель не гарантирована для новых соединений.",
+        "f1_policy": "Политика: максимум F1 на обучающей CV.",
+        "model_policy": "Модель выбрана по максимуму recall на обучающих OOF при precision ≥ {target:.0%}.",
+        "candidate_recall": "OOF recall",
+        "candidate_precision": "OOF precision",
+        "candidate_threshold": "Порог",
+        "baseline_summary": "Исходное правило классификатора (базовый вариант)",
+        "tuned_summary": "Тестовые метрики с выбранным порогом",
         "test_confusion": "Классификация тестовой выборки",
         "metric_labels": {
             "auprc": "AUPRC",
@@ -142,6 +163,8 @@ translations = {
             "balanced_accuracy": "Сбалансированная точность",
             "f1": "F1",
             "mcc": "MCC",
+            "precision": "Точность (precision)",
+            "recall": "Полнота (recall)",
         },
         "confusion_labels": {
             "true_negatives": "Истинно отрицательные",
@@ -228,6 +251,24 @@ if MODEL_PATH.is_file():
                 use_container_width=True,
                 hide_index=True,
             )
+            if model_artifact.get("selection_metric") == "recall_at_precision":
+                st.caption(text["model_policy"].format(target=model_artifact.get(
+                    "model_selection_min_precision", model_artifact["threshold_selection"]["min_precision"])))
+                st.dataframe(pd.DataFrame([
+                    {text["cv_model"]: name,
+                     text["candidate_precision"]: round(candidate.get("precision", float("nan")), 3),
+                     text["candidate_recall"]: round(candidate.get("recall", float("nan")), 3),
+                     text["candidate_threshold"]: round(candidate.get("threshold", float("nan")), 3)}
+                    for name, candidate in model_artifact["candidate_thresholds"].items()
+                ]), use_container_width=True, hide_index=True)
+            if "decision_threshold" in model_artifact:
+                st.caption(text["threshold_summary"].format(threshold=model_artifact["decision_threshold"]))
+                policy = model_artifact.get("threshold_selection", {})
+                if policy.get("criterion") == "precision":
+                    st.caption(text["precision_policy"].format(target=policy["min_precision"]))
+                elif policy.get("criterion") == "f1":
+                    st.caption(text["f1_policy"])
+                st.write(text["baseline_summary"])
             test_rows = [
                 {
                     text["test_summary"]: text["metric_labels"][metric],
@@ -255,6 +296,16 @@ if MODEL_PATH.is_file():
                     use_container_width=True,
                     hide_index=True,
                 )
+            if "threshold_test_metrics" in model_artifact:
+                st.write(text["tuned_summary"])
+                st.dataframe(pd.DataFrame([
+                    {text["test_summary"]: text["metric_labels"][metric], "Score": round(value, 3)}
+                    for metric, value in model_artifact["threshold_test_metrics"].items()
+                ]), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame([
+                    {text["test_confusion"]: text["confusion_labels"][key], "Count": value}
+                    for key, value in model_artifact["threshold_test_confusion"].items()
+                ]), use_container_width=True, hide_index=True)
 else:
     st.warning(text["model_missing"])
 
@@ -331,19 +382,18 @@ if submitted:
         }
         st.dataframe(translated_descriptors, use_container_width=True)
         if MODEL_PATH.is_file():
-            fingerprint = morgan_fingerprint(
+            fingerprint = molecular_features(
                 smiles,
                 radius=model_artifact["fingerprint_radius"],
                 n_bits=model_artifact["fingerprint_bits"],
+                include_descriptors=model_artifact.get("include_descriptors", False),
             )
             features = fingerprint.reshape(1, -1)
-            prediction = int(model_artifact["model"].predict(features)[0])
-            classes = list(model_artifact["model"].classes_)
-            positive_index = classes.index(model_artifact["positive_label"])
-            score = float(
-                model_artifact["model"].predict_proba(features)[
-                    0, positive_index
-                ]
+            score = float(inhibition_scores(model_artifact["model"], features)[0])
+            prediction = (
+                int(score >= model_artifact["decision_threshold"])
+                if "decision_threshold" in model_artifact
+                else int(model_artifact["model"].predict(features)[0])
             )
             prediction_text = (
                 text["inhibitor"] if prediction == 1 else text["non_inhibitor"]
@@ -351,3 +401,5 @@ if submitted:
             st.subheader(text["prediction"])
             st.metric(text["prediction"], prediction_text)
             st.metric(text["score"], f"{score:.1%}")
+            if "decision_threshold" in model_artifact:
+                st.caption(text["threshold_summary"].format(threshold=model_artifact["decision_threshold"]))

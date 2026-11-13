@@ -54,3 +54,13 @@ def calculate_descriptors(smiles: str) -> dict[str, float | int]:
         "Hydrogen-bond acceptors": int(Lipinski.NumHAcceptors(molecule)),
         "Rotatable bonds": int(Lipinski.NumRotatableBonds(molecule)),
     }
+
+
+def molecular_features(smiles: str, radius=2, n_bits=2048, include_descriptors=False):
+    """Build the same ordered feature vector for training and inference."""
+    fingerprint = morgan_fingerprint(smiles, radius=radius, n_bits=n_bits)
+    if not include_descriptors:
+        return fingerprint
+    return np.concatenate([
+        fingerprint, np.asarray(list(calculate_descriptors(smiles).values()), dtype=np.float32)
+    ]).astype(np.float32)
